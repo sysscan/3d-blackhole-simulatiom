@@ -1,0 +1,999 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Black Hole Simulation</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background: #000;
+            font-family: 'Courier New', monospace;
+        }
+        canvas {
+            display: block;
+        }
+        #info {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            color: #0ff;
+            font-size: 14px;
+            text-shadow: 0 0 10px #0ff;
+            pointer-events: none;
+            line-height: 1.6;
+        }
+        #controls {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            color: #0ff;
+            background: rgba(0, 20, 40, 0.8);
+            padding: 15px;
+            border-radius: 5px;
+            border: 1px solid #0ff;
+            font-size: 12px;
+        }
+        .control-group {
+            margin-bottom: 10px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+        }
+        input[type="range"] {
+            width: 150px;
+        }
+        button {
+            background: #003;
+            color: #0ff;
+            border: 1px solid #0ff;
+            padding: 5px 10px;
+            cursor: pointer;
+            margin: 2px;
+        }
+        button:hover {
+            background: #006;
+        }
+    </style>
+</head>
+<body>
+    <div id="info">
+        BLACK HOLE SIMULATION<br>
+        Mass: <span id="mass">10</span> Solar Masses<br>
+        Schwarzschild Radius: <span id="radius">0</span> km<br>
+        Hawking Temperature: <span id="temp">0</span> nK<br>
+        <br>
+        Controls:<br>
+        • Click + Drag: Rotate<br>
+        • Scroll: Zoom<br>
+        • Space: Toggle Jets
+    </div>
+    
+    <div id="controls">
+        <div class="control-group">
+            <label>Black Hole Mass: <span id="massValue">10</span> M☉</label>
+            <input type="range" id="massSlider" min="1" max="100" value="10" step="1">
+        </div>
+        <div class="control-group">
+            <label>Accretion Rate: <span id="accretionValue">50</span>%</label>
+            <input type="range" id="accretionSlider" min="0" max="100" value="50" step="1">
+        </div>
+        <div class="control-group">
+            <label>Rotation Speed: <span id="rotationValue">1.0</span>x</label>
+            <input type="range" id="rotationSlider" min="0" max="3" value="1" step="0.1">
+        </div>
+        <div class="control-group">
+            <button id="toggleJets">Toggle Jets</button>
+            <button id="toggleLensing">Toggle Lensing</button>
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script>
+        let scene, camera, renderer, blackHole, accretionDisk, jets, stars;
+        let particleSystem, lensingEffect;
+        let showJets = true;
+        let showLensing = true;
+        let rotationSpeed = 1.0;
+        let blackHoleMass = 10;
+        let accretionRate = 50;
+        let composer, lensDistortionPass;
+        let renderTarget, lensShader;
+
+        function init() {
+            scene = new THREE.Scene();
+            
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 10000);
+            camera.position.set(0, 50, 150);
+            camera.lookAt(0, 0, 0);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.body.appendChild(renderer.domElement);
+
+            setupPostProcessing();
+
+            createStarfield();
+            createBlackHole();
+            createAccretionDisk();
+            createJets();
+            createParticles();
+            createGravitationalLensing();
+
+            addLights();
+            setupControls();
+            updatePhysics();
+
+            window.addEventListener('resize', onWindowResize);
+            animate();
+        }
+
+        function setupPostProcessing() {
+            renderTarget = new THREE.WebGLRenderTarget(window.innerWidth, window.innerHeight);
+            
+            lensShader = {
+                uniforms: {
+                    tDiffuse: { value: null },
+                    blackHolePos: { value: new THREE.Vector2(0.5, 0.5) },
+                    lensStrength: { value: 0.3 },
+                    radius: { value: 0.15 }
+                },
+                vertexShader: `
+                    varying vec2 vUv;
+                    void main() {
+                        vUv = uv;
+                        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                    }
+                `,
+                fragmentShader: `
+                    uniform sampler2D tDiffuse;
+                    uniform vec2 blackHolePos;
+                    uniform float lensStrength;
+                    uniform float radius;
+                    varying vec2 vUv;
+                    
+                    void main() {
+                        vec2 toCenter = vUv - blackHolePos;
+                        float dist = length(toCenter);
+                        
+                        vec2 distortedUv = vUv;
+                        
+                        if (dist < radius && dist > 0.001) {
+                            float distortAmount = lensStrength * (1.0 - dist / radius);
+                            distortAmount *= distortAmount;
+                            
+                            vec2 direction = normalize(toCenter);
+                            float angle = atan(direction.y, direction.x);
+                            
+                            float tangentX = -sin(angle);
+                            float tangentY = cos(angle);
+                            vec2 tangent = vec2(tangentX, tangentY);
+                            
+                            distortedUv += tangent * distortAmount * 0.05;
+                            distortedUv += direction * distortAmount * 0.02;
+                        }
+                        
+                        if (dist < radius * 0.3) {
+                            float innerDist = dist / (radius * 0.3);
+                            float chromaShift = (1.0 - innerDist) * 0.01;
+                            
+                            float r = texture2D(tDiffuse, distortedUv + vec2(chromaShift, 0.0)).r;
+                            float g = texture2D(tDiffuse, distortedUv).g;
+                            float b = texture2D(tDiffuse, distortedUv - vec2(chromaShift, 0.0)).b;
+                            
+                            gl_FragColor = vec4(r, g, b, 1.0);
+                        } else {
+                            gl_FragColor = texture2D(tDiffuse, distortedUv);
+                        }
+                    }
+                `
+            };
+        }
+
+        function createStarfield() {
+            const starsGeometry = new THREE.BufferGeometry();
+            const starsVertices = [];
+            const starsSizes = [];
+            const starsColors = [];
+
+            for (let i = 0; i < 20000; i++) {
+                const x = (Math.random() - 0.5) * 2500;
+                const y = (Math.random() - 0.5) * 2500;
+                const z = (Math.random() - 0.5) * 2500;
+                starsVertices.push(x, y, z);
+                
+                const distance = Math.sqrt(x*x + y*y + z*z);
+                const sizeFactor = 1.0 + (distance / 2500) * 2;
+                starsSizes.push((Math.random() * 2 + 0.5) * sizeFactor);
+                
+                const colorChoice = Math.random();
+                if (colorChoice > 0.97) {
+                    starsColors.push(1.0, 0.7, 0.4);
+                } else if (colorChoice > 0.94) {
+                    starsColors.push(0.5, 0.7, 1.0);
+                } else if (colorChoice > 0.90) {
+                    starsColors.push(1.0, 0.9, 0.7);
+                } else if (colorChoice > 0.85) {
+                    starsColors.push(0.7, 0.8, 1.0);
+                } else {
+                    const brightness = 0.8 + Math.random() * 0.2;
+                    starsColors.push(brightness, brightness, brightness);
+                }
+            }
+
+            starsGeometry.setAttribute('position', new THREE.Float32BufferAttribute(starsVertices, 3));
+            starsGeometry.setAttribute('size', new THREE.Float32BufferAttribute(starsSizes, 1));
+            starsGeometry.setAttribute('customColor', new THREE.Float32BufferAttribute(starsColors, 3));
+
+            const starsMaterial = new THREE.ShaderMaterial({
+                uniforms: {
+                    time: { value: 0 }
+                },
+                vertexShader: `
+                    uniform float time;
+                    attribute float size;
+                    attribute vec3 customColor;
+                    varying vec3 vColor;
+                    varying float vIntensity;
+                    void main() {
+                        vColor = customColor;
+                        vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+                        float twinkle = sin(time + position.x * 0.1) * 0.3 + 0.7;
+                        vIntensity = twinkle;
+                        gl_PointSize = size * (300.0 / -mvPosition.z) * twinkle;
+                        gl_Position = projectionMatrix * mvPosition;
+                    }
+                `,
+                fragmentShader: `
+                    varying vec3 vColor;
+                    varying float vIntensity;
+                    void main() {
+                        float r = distance(gl_PointCoord, vec2(0.5));
+                        float alpha = 1.0 - smoothstep(0.0, 0.5, r);
+                        alpha = pow(alpha, 1.5);
+                        gl_FragColor = vec4(vColor * vIntensity, alpha * vIntensity);
+                    }
+                `,
+                transparent: true,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false
+            });
+
+            stars = new THREE.Points(starsGeometry, starsMaterial);
+            scene.add(stars);
+
+            const nebulaGeometry = new THREE.BufferGeometry();
+            const nebulaVertices = [];
+            const nebulaSizes = [];
+            const nebulaColors = [];
+
+            for (let i = 0; i < 3000; i++) {
+                const angle = Math.random() * Math.PI * 2;
+                const radius = 300 + Math.random() * 1000;
+                const height = (Math.random() - 0.5) * 800;
+                
+                const x = Math.cos(angle) * radius;
+                const y = height;
+                const z = Math.sin(angle) * radius;
+                nebulaVertices.push(x, y, z);
+                
+                nebulaSizes.push(Math.random() * 40 + 20);
+                
+                const nebulaType = Math.random();
+                if (nebulaType > 0.5) {
+                    nebulaColors.push(0.8, 0.3, 0.5);
+                } else {
+                    nebulaColors.push(0.3, 0.5, 0.8);
+                }
+            }
+
+            nebulaGeometry.setAttribute('position', new THREE.Float32BufferAttribute(nebulaVertices, 3));
+            nebulaGeometry.setAttribute('size', new THREE.Float32BufferAttribute(nebulaSizes, 1));
+            nebulaGeometry.setAttribute('customColor', new THREE.Float32BufferAttribute(nebulaColors, 3));
+
+            const nebulaMaterial = new THREE.ShaderMaterial({
+                uniforms: {
+                    time: { value: 0 }
+                },
+                vertexShader: `
+                    uniform float time;
+                    attribute float size;
+                    attribute vec3 customColor;
+                    varying vec3 vColor;
+                    varying float vSize;
+                    void main() {
+                        vColor = customColor;
+                        vSize = size;
+                        vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+                        gl_PointSize = size * (300.0 / -mvPosition.z);
+                        gl_Position = projectionMatrix * mvPosition;
+                    }
+                `,
+                fragmentShader: `
+                    uniform float time;
+                    varying vec3 vColor;
+                    varying float vSize;
+                    void main() {
+                        vec2 center = gl_PointCoord - vec2(0.5);
+                        float r = length(center);
+                        float alpha = exp(-r * 3.0) * 0.15;
+                        gl_FragColor = vec4(vColor, alpha);
+                    }
+                `,
+                transparent: true,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false
+            });
+
+            const nebula = new THREE.Points(nebulaGeometry, nebulaMaterial);
+            scene.add(nebula);
+            stars.userData.nebula = nebula;
+        }
+
+        function createBlackHole() {
+            const geometry = new THREE.SphereGeometry(10, 64, 64);
+            const material = new THREE.MeshBasicMaterial({
+                color: 0x000000,
+                transparent: true,
+                opacity: 1.0
+            });
+            blackHole = new THREE.Mesh(geometry, material);
+            scene.add(blackHole);
+
+            const eventHorizonGeometry = new THREE.SphereGeometry(10.2, 64, 64);
+            const eventHorizonMaterial = new THREE.ShaderMaterial({
+                uniforms: {
+                    time: { value: 0 }
+                },
+                vertexShader: `
+                    varying vec3 vNormal;
+                    varying vec3 vPosition;
+                    void main() {
+                        vNormal = normalize(normalMatrix * normal);
+                        vPosition = position;
+                        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                    }
+                `,
+                fragmentShader: `
+                    uniform float time;
+                    varying vec3 vNormal;
+                    varying vec3 vPosition;
+                    void main() {
+                        float fresnel = pow(1.0 - abs(dot(vNormal, vec3(0.0, 0.0, 1.0))), 3.0);
+                        vec3 baseColor = vec3(0.1, 0.3, 0.8);
+                        float pulse = sin(time * 1.5) * 0.15 + 0.85;
+                        vec3 glow = baseColor * fresnel * pulse;
+                        gl_FragColor = vec4(glow, fresnel * 0.5);
+                    }
+                `,
+                transparent: true,
+                side: THREE.BackSide,
+                blending: THREE.AdditiveBlending
+            });
+            const eventHorizon = new THREE.Mesh(eventHorizonGeometry, eventHorizonMaterial);
+            blackHole.add(eventHorizon);
+
+            const photonSphereGeometry = new THREE.SphereGeometry(15, 64, 64);
+            const photonSphereMaterial = new THREE.ShaderMaterial({
+                uniforms: {
+                    time: { value: 0 }
+                },
+                vertexShader: `
+                    varying vec3 vNormal;
+                    void main() {
+                        vNormal = normalize(normalMatrix * normal);
+                        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                    }
+                `,
+                fragmentShader: `
+                    uniform float time;
+                    varying vec3 vNormal;
+                    void main() {
+                        float intensity = pow(0.7 - dot(vNormal, vec3(0.0, 0.0, 1.0)), 4.0);
+                        vec3 color = vec3(0.8, 0.5, 0.2);
+                        float flicker = sin(time * 10.0) * 0.1 + 0.9;
+                        gl_FragColor = vec4(color * intensity * flicker, intensity * 0.15);
+                    }
+                `,
+                transparent: true,
+                side: THREE.BackSide,
+                blending: THREE.AdditiveBlending
+            });
+            const photonSphere = new THREE.Mesh(photonSphereGeometry, photonSphereMaterial);
+            blackHole.add(photonSphere);
+        }
+
+        function createAccretionDisk() {
+            accretionDisk = new THREE.Group();
+            
+            const particleCount = 8000;
+            const geometry = new THREE.BufferGeometry();
+            const positions = [];
+            const colors = [];
+            const sizes = [];
+
+            for (let i = 0; i < particleCount; i++) {
+                const angle = Math.random() * Math.PI * 2;
+                const radius = 15 + Math.random() * 55;
+                const x = Math.cos(angle) * radius;
+                const z = Math.sin(angle) * radius;
+                
+                const heightFactor = Math.exp(-Math.abs(radius - 30) / 20);
+                const y = (Math.random() - 0.5) * 3 * heightFactor;
+
+                positions.push(x, y, z);
+
+                const temp = Math.pow(1.0 - (radius - 15) / 55, 1.5);
+                let r, g, b;
+                
+                if (temp > 0.8) {
+                    r = 1.0;
+                    g = 1.0;
+                    b = 0.9 + temp * 0.1;
+                } else if (temp > 0.5) {
+                    r = 1.0;
+                    g = 0.6 + temp * 0.4;
+                    b = 0.3 + temp * 0.3;
+                } else {
+                    r = 1.0;
+                    g = 0.3 + temp * 0.5;
+                    b = 0.1;
+                }
+                
+                colors.push(r, g, b);
+                sizes.push(Math.random() * 2.5 + 0.8);
+            }
+
+            geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+            geometry.setAttribute('customColor', new THREE.Float32BufferAttribute(colors, 3));
+            geometry.setAttribute('size', new THREE.Float32BufferAttribute(sizes, 1));
+
+            const material = new THREE.ShaderMaterial({
+                uniforms: {
+                    time: { value: 0 }
+                },
+                vertexShader: `
+                    attribute float size;
+                    attribute vec3 customColor;
+                    varying vec3 vColor;
+                    varying float vIntensity;
+                    void main() {
+                        vColor = customColor;
+                        vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+                        float dist = length(position.xz);
+                        vIntensity = 1.0 - smoothstep(15.0, 70.0, dist);
+                        gl_PointSize = size * (300.0 / -mvPosition.z) * (1.0 + vIntensity * 0.5);
+                        gl_Position = projectionMatrix * mvPosition;
+                    }
+                `,
+                fragmentShader: `
+                    varying vec3 vColor;
+                    varying float vIntensity;
+                    void main() {
+                        float r = distance(gl_PointCoord, vec2(0.5));
+                        if (r > 0.5) discard;
+                        float alpha = 1.0 - (r * 2.0);
+                        alpha = pow(alpha, 2.0);
+                        gl_FragColor = vec4(vColor * (0.8 + vIntensity * 0.5), alpha * (0.7 + vIntensity * 0.3));
+                    }
+                `,
+                transparent: true,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false
+            });
+
+            const diskParticles = new THREE.Points(geometry, material);
+            accretionDisk.add(diskParticles);
+            scene.add(accretionDisk);
+        }
+
+        function createJets() {
+            jets = new THREE.Group();
+
+            const createJet = (direction) => {
+                const geometry = new THREE.CylinderGeometry(0.2, 4, 120, 16);
+                const material = new THREE.ShaderMaterial({
+                    uniforms: {
+                        time: { value: 0 }
+                    },
+                    vertexShader: `
+                        varying vec2 vUv;
+                        varying vec3 vPosition;
+                        void main() {
+                            vUv = uv;
+                            vPosition = position;
+                            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                        }
+                    `,
+                    fragmentShader: `
+                        uniform float time;
+                        varying vec2 vUv;
+                        varying vec3 vPosition;
+                        void main() {
+                            float distFromCenter = length(vPosition.xz);
+                            float edgeFade = 1.0 - smoothstep(0.0, 4.0, distFromCenter);
+                            float lengthFade = pow(1.0 - vUv.x, 2.0);
+                            float pulse = sin(vPosition.y * 0.05 + time * 5.0) * 0.2 + 0.8;
+                            vec3 color = vec3(0.4, 0.6, 1.0);
+                            float intensity = edgeFade * lengthFade * pulse;
+                            gl_FragColor = vec4(color * intensity, intensity * 0.5);
+                        }
+                    `,
+                    transparent: true,
+                    blending: THREE.AdditiveBlending,
+                    side: THREE.DoubleSide
+                });
+
+                const jet = new THREE.Mesh(geometry, material);
+                jet.position.y = direction * 60;
+
+                const coreGeometry = new THREE.CylinderGeometry(0.05, 0.8, 120, 8);
+                const coreMaterial = new THREE.ShaderMaterial({
+                    uniforms: {
+                        time: { value: 0 }
+                    },
+                    vertexShader: `
+                        varying vec2 vUv;
+                        void main() {
+                            vUv = uv;
+                            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                        }
+                    `,
+                    fragmentShader: `
+                        uniform float time;
+                        varying vec2 vUv;
+                        void main() {
+                            float intensity = pow(1.0 - vUv.x, 1.5);
+                            vec3 color = vec3(0.8, 0.9, 1.0);
+                            gl_FragColor = vec4(color * intensity, intensity * 0.8);
+                        }
+                    `,
+                    transparent: true,
+                    blending: THREE.AdditiveBlending,
+                    side: THREE.DoubleSide
+                });
+
+                const core = new THREE.Mesh(coreGeometry, coreMaterial);
+                core.position.y = direction * 60;
+                
+                const group = new THREE.Group();
+                group.add(jet);
+                group.add(core);
+                return group;
+            };
+
+            jets.add(createJet(1));
+            jets.add(createJet(-1));
+            scene.add(jets);
+        }
+
+        function createParticles() {
+            const geometry = new THREE.BufferGeometry();
+            const positions = [];
+            const velocities = [];
+            const ages = [];
+            const lifetimes = [];
+
+            for (let i = 0; i < 2000; i++) {
+                const angle = Math.random() * Math.PI * 2;
+                const radius = 70 + Math.random() * 40;
+                positions.push(
+                    Math.cos(angle) * radius,
+                    (Math.random() - 0.5) * 15,
+                    Math.sin(angle) * radius
+                );
+                
+                const speed = 0.3 + Math.random() * 0.5;
+                const vAngle = angle + Math.PI / 2;
+                velocities.push(
+                    Math.cos(vAngle) * speed,
+                    (Math.random() - 0.5) * 0.2,
+                    Math.sin(vAngle) * speed
+                );
+                
+                ages.push(Math.random() * 100);
+                lifetimes.push(50 + Math.random() * 100);
+            }
+
+            geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+            geometry.setAttribute('velocity', new THREE.Float32BufferAttribute(velocities, 3));
+            geometry.setAttribute('age', new THREE.Float32BufferAttribute(ages, 1));
+            geometry.setAttribute('lifetime', new THREE.Float32BufferAttribute(lifetimes, 1));
+
+            const material = new THREE.ShaderMaterial({
+                uniforms: {
+                    time: { value: 0 }
+                },
+                vertexShader: `
+                    attribute vec3 velocity;
+                    attribute float age;
+                    attribute float lifetime;
+                    varying float vIntensity;
+                    varying vec3 vColor;
+                    void main() {
+                        float lifeRatio = age / lifetime;
+                        vIntensity = 1.0 - lifeRatio;
+                        
+                        float dist = length(position);
+                        float temp = 1.0 - smoothstep(15.0, 110.0, dist);
+                        
+                        if (temp > 0.7) {
+                            vColor = vec3(1.0, 1.0, 0.9);
+                        } else if (temp > 0.4) {
+                            vColor = vec3(1.0, 0.7, 0.3);
+                        } else {
+                            vColor = vec3(1.0, 0.4, 0.1);
+                        }
+                        
+                        vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+                        float size = (2.0 + temp * 3.0) * vIntensity;
+                        gl_PointSize = size * (300.0 / -mvPosition.z);
+                        gl_Position = projectionMatrix * mvPosition;
+                    }
+                `,
+                fragmentShader: `
+                    varying float vIntensity;
+                    varying vec3 vColor;
+                    void main() {
+                        vec2 center = gl_PointCoord - vec2(0.5);
+                        float r = length(center);
+                        if (r > 0.5) discard;
+                        float alpha = (1.0 - r * 2.0) * vIntensity;
+                        alpha = pow(alpha, 1.5);
+                        gl_FragColor = vec4(vColor * (0.8 + vIntensity * 0.5), alpha * 0.9);
+                    }
+                `,
+                transparent: true,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false
+            });
+
+            particleSystem = new THREE.Points(geometry, material);
+            scene.add(particleSystem);
+        }
+
+        function createGravitationalLensing() {
+            lensingEffect = new THREE.Group();
+            
+            for (let i = 0; i < 3; i++) {
+                const radius = 30 + i * 8;
+                const geometry = new THREE.TorusGeometry(radius, 0.5, 16, 100);
+                const material = new THREE.ShaderMaterial({
+                    uniforms: {
+                        time: { value: 0 },
+                        offset: { value: i * 0.5 }
+                    },
+                    vertexShader: `
+                        varying vec3 vPosition;
+                        void main() {
+                            vPosition = position;
+                            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                        }
+                    `,
+                    fragmentShader: `
+                        uniform float time;
+                        uniform float offset;
+                        varying vec3 vPosition;
+                        void main() {
+                            float wave = sin(vPosition.x * 0.1 + time + offset) * 0.5 + 0.5;
+                            vec3 color = vec3(0.3, 0.6, 1.0);
+                            float alpha = wave * 0.15;
+                            gl_FragColor = vec4(color, alpha);
+                        }
+                    `,
+                    transparent: true,
+                    blending: THREE.AdditiveBlending,
+                    side: THREE.DoubleSide
+                });
+                const ring = new THREE.Mesh(geometry, material);
+                ring.rotation.x = Math.PI / 2;
+                lensingEffect.add(ring);
+            }
+            
+            scene.add(lensingEffect);
+        }
+
+        function addLights() {
+            const ambientLight = new THREE.AmbientLight(0x0a0a15, 0.3);
+            scene.add(ambientLight);
+
+            const diskLight = new THREE.PointLight(0xff8844, 4, 200);
+            diskLight.position.set(0, 0, 0);
+            scene.add(diskLight);
+
+            const blueLight = new THREE.PointLight(0x4488ff, 2, 120);
+            blueLight.position.set(0, 0, 0);
+            scene.add(blueLight);
+
+            const topJetLight = new THREE.PointLight(0x6699ff, 2.5, 150);
+            topJetLight.position.set(0, 80, 0);
+            scene.add(topJetLight);
+
+            const bottomJetLight = new THREE.PointLight(0x6699ff, 2.5, 150);
+            bottomJetLight.position.set(0, -80, 0);
+            scene.add(bottomJetLight);
+
+            const rimLight1 = new THREE.DirectionalLight(0xff6633, 0.8);
+            rimLight1.position.set(100, 20, 100);
+            scene.add(rimLight1);
+
+            const rimLight2 = new THREE.DirectionalLight(0x3366ff, 0.6);
+            rimLight2.position.set(-100, -20, -100);
+            scene.add(rimLight2);
+
+            const fillLight = new THREE.HemisphereLight(0x2244aa, 0x110022, 0.5);
+            scene.add(fillLight);
+
+            scene.userData.lights = {
+                disk: diskLight,
+                blue: blueLight,
+                topJet: topJetLight,
+                bottomJet: bottomJetLight
+            };
+        }
+
+        function setupControls() {
+            let isDragging = false;
+            let previousMousePosition = { x: 0, y: 0 };
+
+            renderer.domElement.addEventListener('mousedown', (e) => {
+                isDragging = true;
+                previousMousePosition = { x: e.clientX, y: e.clientY };
+            });
+
+            renderer.domElement.addEventListener('mousemove', (e) => {
+                if (isDragging) {
+                    const deltaX = e.clientX - previousMousePosition.x;
+                    const deltaY = e.clientY - previousMousePosition.y;
+                    
+                    scene.rotation.y += deltaX * 0.005;
+                    scene.rotation.x += deltaY * 0.005;
+                    
+                    previousMousePosition = { x: e.clientX, y: e.clientY };
+                }
+            });
+
+            renderer.domElement.addEventListener('mouseup', () => {
+                isDragging = false;
+            });
+
+            renderer.domElement.addEventListener('wheel', (e) => {
+                e.preventDefault();
+                camera.position.z += e.deltaY * 0.1;
+                camera.position.z = Math.max(50, Math.min(300, camera.position.z));
+            });
+
+            document.addEventListener('keydown', (e) => {
+                if (e.code === 'Space') {
+                    e.preventDefault();
+                    showJets = !showJets;
+                    jets.visible = showJets;
+                }
+            });
+
+            document.getElementById('massSlider').addEventListener('input', (e) => {
+                blackHoleMass = parseFloat(e.target.value);
+                document.getElementById('massValue').textContent = blackHoleMass;
+                updateBlackHoleSize();
+                updatePhysics();
+            });
+
+            document.getElementById('accretionSlider').addEventListener('input', (e) => {
+                accretionRate = parseFloat(e.target.value);
+                document.getElementById('accretionValue').textContent = accretionRate;
+            });
+
+            document.getElementById('rotationSlider').addEventListener('input', (e) => {
+                rotationSpeed = parseFloat(e.target.value);
+                document.getElementById('rotationValue').textContent = rotationSpeed.toFixed(1);
+            });
+
+            document.getElementById('toggleJets').addEventListener('click', () => {
+                showJets = !showJets;
+                jets.visible = showJets;
+            });
+
+            document.getElementById('toggleLensing').addEventListener('click', () => {
+                showLensing = !showLensing;
+                lensingEffect.visible = showLensing;
+            });
+        }
+
+        function updateBlackHoleSize() {
+            const scale = Math.pow(blackHoleMass / 10, 0.33);
+            blackHole.scale.set(scale, scale, scale);
+        }
+
+        function updatePhysics() {
+            const G = 6.674e-11;
+            const M_sun = 1.989e30;
+            const c = 299792458;
+            
+            const mass_kg = blackHoleMass * M_sun;
+            const schwarzschildRadius = (2 * G * mass_kg) / (c * c) / 1000;
+            
+            const h = 6.626e-34;
+            const k = 1.381e-23;
+            const hawkingTemp = (h * c * c * c) / (8 * Math.PI * G * mass_kg * k) * 1e9;
+            
+            document.getElementById('mass').textContent = blackHoleMass;
+            document.getElementById('radius').textContent = schwarzschildRadius.toFixed(2);
+            document.getElementById('temp').textContent = hawkingTemp.toFixed(4);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            const time = Date.now() * 0.001;
+
+            accretionDisk.rotation.y += 0.005 * rotationSpeed * (accretionRate / 50);
+
+            const positions = particleSystem.geometry.attributes.position.array;
+            const velocities = particleSystem.geometry.attributes.velocity.array;
+            const ages = particleSystem.geometry.attributes.age.array;
+            const lifetimes = particleSystem.geometry.attributes.lifetime.array;
+            
+            const bhMassFactor = blackHoleMass / 10;
+            const gravityStrength = 250 * bhMassFactor;
+            const eventHorizon = 10 * Math.pow(bhMassFactor, 0.33);
+            
+            for (let i = 0; i < positions.length; i += 3) {
+                const x = positions[i];
+                const y = positions[i + 1];
+                const z = positions[i + 2];
+                
+                const distance = Math.sqrt(x * x + y * y + z * z);
+                const force = gravityStrength / (distance * distance + 10);
+                
+                const dirX = x / distance;
+                const dirY = y / distance;
+                const dirZ = z / distance;
+                
+                const radialPull = force * 0.015 * (accretionRate / 50);
+                velocities[i] -= dirX * radialPull;
+                velocities[i + 1] -= dirY * radialPull * 0.5;
+                velocities[i + 2] -= dirZ * radialPull;
+                
+                const tangentX = -z / distance;
+                const tangentZ = x / distance;
+                const orbitalSpeed = Math.sqrt(100 * bhMassFactor / distance) * 0.3;
+                const orbitalFactor = 1.0 - Math.exp(-distance / 30);
+                velocities[i] += tangentX * orbitalSpeed * orbitalFactor;
+                velocities[i + 2] += tangentZ * orbitalSpeed * orbitalFactor;
+                
+                if (distance < 50) {
+                    const tidalForce = 0.5 / (distance + 1);
+                    velocities[i + 1] += (Math.random() - 0.5) * tidalForce;
+                }
+                
+                positions[i] += velocities[i];
+                positions[i + 1] += velocities[i + 1];
+                positions[i + 2] += velocities[i + 2];
+                
+                const drag = 0.98 + (distance / 500) * 0.01;
+                velocities[i] *= drag;
+                velocities[i + 1] *= drag;
+                velocities[i + 2] *= drag;
+                
+                ages[i / 3] += 1;
+                
+                const captureRadius = eventHorizon + 2;
+                if (distance < captureRadius || ages[i / 3] > lifetimes[i / 3]) {
+                    const angle = Math.random() * Math.PI * 2;
+                    const spawnDist = 70 + Math.random() * 40;
+                    positions[i] = Math.cos(angle) * spawnDist;
+                    positions[i + 1] = (Math.random() - 0.5) * 15;
+                    positions[i + 2] = Math.sin(angle) * spawnDist;
+                    
+                    const speed = 0.3 + Math.random() * 0.5;
+                    const vAngle = angle + Math.PI / 2;
+                    velocities[i] = Math.cos(vAngle) * speed;
+                    velocities[i + 1] = (Math.random() - 0.5) * 0.2;
+                    velocities[i + 2] = Math.sin(vAngle) * speed;
+                    
+                    ages[i / 3] = 0;
+                }
+            }
+            particleSystem.geometry.attributes.position.needsUpdate = true;
+            particleSystem.geometry.attributes.velocity.needsUpdate = true;
+            particleSystem.geometry.attributes.age.needsUpdate = true;
+
+            if (blackHole.children[0]) {
+                blackHole.children[0].material.uniforms.time.value = time;
+            }
+            if (blackHole.children[1]) {
+                blackHole.children[1].material.uniforms.time.value = time;
+            }
+
+            jets.children.forEach(jetGroup => {
+                jetGroup.children.forEach(jet => {
+                    if (jet.material.uniforms) {
+                        jet.material.uniforms.time.value = time;
+                    }
+                });
+            });
+
+            stars.rotation.y += 0.0001;
+            if (stars.material.uniforms) {
+                stars.material.uniforms.time.value = time;
+            }
+            if (stars.userData.nebula) {
+                stars.userData.nebula.rotation.y += 0.00005;
+                if (stars.userData.nebula.material.uniforms) {
+                    stars.userData.nebula.material.uniforms.time.value = time;
+                }
+            }
+
+            if (scene.userData.lights) {
+                const pulse = Math.sin(time * 2) * 0.3 + 0.7;
+                scene.userData.lights.disk.intensity = 3.5 + pulse * 1.5;
+                scene.userData.lights.blue.intensity = 1.8 + pulse * 0.5;
+                
+                const jetPulse = Math.sin(time * 3) * 0.5 + 0.5;
+                scene.userData.lights.topJet.intensity = 2.0 + jetPulse;
+                scene.userData.lights.bottomJet.intensity = 2.0 + jetPulse;
+            }
+
+            lensingEffect.children.forEach(ring => {
+                ring.material.uniforms.time.value = time;
+                ring.rotation.z += 0.005;
+            });
+
+            renderer.render(scene, camera);
+            
+            applyGravitationalLensing();
+        }
+
+        function applyGravitationalLensing() {
+            const blackHoleWorldPos = new THREE.Vector3(0, 0, 0);
+            blackHole.getWorldPosition(blackHoleWorldPos);
+            
+            const blackHoleScreenPos = blackHoleWorldPos.clone();
+            blackHoleScreenPos.project(camera);
+            
+            const screenX = (blackHoleScreenPos.x + 1) / 2;
+            const screenY = (1 - blackHoleScreenPos.y) / 2;
+            
+            if (blackHoleScreenPos.z < 1) {
+                const distFromCamera = camera.position.distanceTo(blackHoleWorldPos);
+                const lensStrengthValue = Math.min(0.5, 30 / distFromCamera) * (blackHoleMass / 10);
+                const radiusValue = Math.min(0.25, 20 / distFromCamera) * Math.pow(blackHoleMass / 10, 0.3);
+                
+                renderer.setRenderTarget(renderTarget);
+                renderer.render(scene, camera);
+                renderer.setRenderTarget(null);
+                
+                lensShader.uniforms.tDiffuse.value = renderTarget.texture;
+                lensShader.uniforms.blackHolePos.value.set(screenX, screenY);
+                lensShader.uniforms.lensStrength.value = lensStrengthValue;
+                lensShader.uniforms.radius.value = radiusValue;
+                
+                const postScene = new THREE.Scene();
+                const postCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+                const postMaterial = new THREE.ShaderMaterial(lensShader);
+                const postPlane = new THREE.Mesh(
+                    new THREE.PlaneGeometry(2, 2),
+                    postMaterial
+                );
+                postScene.add(postPlane);
+                
+                renderer.render(postScene, postCamera);
+            }
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            
+            if (renderTarget) {
+                renderTarget.setSize(window.innerWidth, window.innerHeight);
+            }
+        }
+
+        init();
+    </script>
+</body>
+</html>
